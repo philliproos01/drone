@@ -19,7 +19,7 @@
 
 // include the library
 #include <RadioLib.h>
-
+void setFlag(void);
 // SX1278 has the following connections:
 // NSS pin:   10
 // DIO0 pin:  2
