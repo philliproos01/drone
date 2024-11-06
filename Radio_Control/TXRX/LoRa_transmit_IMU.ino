@@ -1,4 +1,4 @@
-
+#include <Arduino.h>
 #include <RadioLib.h>
 #include "Arduino_BMI270_BMM150.h"
 
@@ -78,8 +78,8 @@ MyBoschSensor myIMU(Wire1);
 void setup() {
 
 
-  Serial.begin(9600);
-    //Serial.begin(115200);
+  //Serial.begin(9600);
+  Serial.begin(115200);
   while (!Serial);
   myIMU.debug(Serial);
   myIMU.onInterrupt(print_data);
@@ -96,7 +96,7 @@ void setup() {
   } else {
     Serial.print(F("failed, code "));
     Serial.println(state);
-    while (true) { delay(10); }
+    while (true) { delay(1); }
   }
 
   // set the function that will be called
@@ -108,7 +108,7 @@ void setup() {
 
   // you can transmit C-string or Arduino string up to
   // 255 characters long
-  transmissionState = radio.startTransmit("Hello World!");
+  transmissionState = radio.startTransmit("accel data: ");
 
   // you can also transmit byte array up to 255 bytes long
   /*
@@ -203,21 +203,21 @@ void loop() {
     radio.finishTransmit();
 
     // wait a second before transmitting again
-    delay(1000);
+    //delay(1000)
 
     // send another one
     Serial.print(F("[SX1278] Sending another packet ... "));
 
     // you can transmit C-string or Arduino string up to
     // 255 characters long
-    String str = "Hello World! #" + String(accel_x) + String(accel_y) + String(accel_z);
+    String data = "Data: " + String(accel_x) + " " + String(accel_y) + " " + String(accel_z) + " " + String(gyro_x) + " " + String(gyro_y) + " " + String(gyro_z) + " " + String(mag_x) + " " + String(mag_y) + " " + String(mag_z);
     
     
     //String(gyro_x) + String(gyro_y) + String(gyro_z)
     //String(mag_x) + String(mag_y) + String(mag_z)
    
-    //String str = "Hello World! #" + String(count++);
-    transmissionState = radio.startTransmit(str);
+    
+    transmissionState = radio.startTransmit(data);
 
     // you can also transmit byte array up to 255 bytes long
     /*
