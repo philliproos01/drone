@@ -20,13 +20,10 @@ SX1278 radio = new Module(4, 3, 2);
 Radio radio = new RadioModule();
 */
 void setFlag(void);
-float stringToFloat(const char* str, int& index);
-void parseData(const char* data, float* accel, float* gyro, float* mag);
-char* ConvertStringToCharArray(String S);
+float stringToFloat(const char* str, int start, int end);
+int parseData(const char* input, float* output, int maxSize);
 
-float acceleration[3];
-float gyroscopic[3];
-float magnometer[3];
+
 
 
 void setup() {
@@ -82,6 +79,10 @@ void setFlag(void) {
 }
 
 void loop() {
+  
+  float dataArray[10];
+  const char* dataString = "Data: 0.00 1.11 2.22 3.33 4.44 5.55 6.66 7.77 8.88";
+  
   // check if the flag is set
   if(receivedFlag) {
     // reset flag
@@ -131,71 +132,62 @@ void loop() {
       Serial.println(state);
 
     }
+  int dataCount = parseData(dataString, dataArray, 10);
+  Serial.print("Parsed ");
+  Serial.print(dataCount);
+  Serial.println(" values:");
   
-  parseData(ConvertStringToCharArray(str), acceleration, gyroscopic, magnometer);
-  
+  for (int i = 0; i < dataCount; i++) {
+      Serial.println(dataArray[i], 2);  // Print with 2 decimal places
+  }
 
   }
 }
 
-float stringToFloat(const char* str, int& index) {
+float stringToFloat(const char* str, int start, int end) {
     float result = 0.0f;
     float fraction = 0.1f;
-    bool negative = false;
     bool decimal = false;
-
-    if (str[index] == '-') {
-        negative = true;
-        index++;
-    }
-
-    while (str[index] != ' ' && str[index] != '\0') {
-        if (str[index] == '.') {
+    bool negative = false;
+    
+    for (int i = start; i < end; i++) {
+        if (str[i] == '-') {
+            negative = true;
+        } else if (str[i] == '.') {
             decimal = true;
-        } else {
-            int digit = str[index] - '0';
-            if (decimal) {
-                result += digit * fraction;
-                fraction *= 0.1f;
+        } else if (str[i] >= '0' && str[i] <= '9') {
+            if (!decimal) {
+                result = result * 10.0f + (str[i] - '0');
             } else {
-                result = result * 10.0f + digit;
+                result += (str[i] - '0') * fraction;
+                fraction *= 0.1f;
             }
         }
-        index++;
     }
-
-    if (negative) {
-        result = -result;
-    }
-
-    return result;
+    
+    return negative ? -result : result;
 }
 
-// Function to parse the data string
-void parseData(const char* data, float* accel, float* gyro, float* mag) {
-    int index = 6; // Start after "Data: "
-
-    for (uint8_t i = 0; i < 3; i++) {
-        accel[i] = stringToFloat(data, index);
-        index++; // Skip space
+// Function to parse the string and fill the float array
+int parseData(const char* input, float* output, int maxSize) {
+    int count = 0;
+    int start = 0;
+    bool dataStarted = false;
+    
+    for (int i = 0; input[i] != '\0' && count < maxSize; i++) {
+        if (!dataStarted) {
+            if (input[i] == ':') {
+                dataStarted = true;
+                start = i + 1;
+            }
+        } else {
+            if (input[i] == ' ' || input[i + 1] == '\0') {
+                int end = (input[i + 1] == '\0') ? i + 1 : i;
+                output[count++] = stringToFloat(input, start, end);
+                start = i + 1;
+            }
+        }
     }
-
-    for (uint8_t i = 0; i < 3; i++) {
-        gyro[i] = stringToFloat(data, index);
-        index++; // Skip space
-    }
-
-    for (uint8_t i = 0; i < 3; i++) {
-        mag[i] = stringToFloat(data, index);
-        index++; // Skip space
-    }
-}
-
-char* ConvertStringToCharArray(String S)
-{
-  int   ArrayLength  = S.length()+1;    //The +1 is for the 0x00h Terminator
-  char  CharArray[ArrayLength];
-  S.toCharArray(CharArray,ArrayLength);
-
-  return(CharArray);
+    
+    return count;
 }
