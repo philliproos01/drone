@@ -1,0 +1,10 @@
+there are a few options for calibration and moving forward:
+- currently has accel and gyro calibrated in latest script, requires mag calibration
+- Calibrating magnometer works with https://github.com/michaelwro/mag-cal-example and https://thecavepearlproject.org/2015/05/22/calibrating-any-compass-or-accelerometer-for-arduino/
+- AHRS by Reefwing has good fusion code working but doesn't necessarily say how to add hard-iron offsets for a magnometer, 
+thats the next step and (probably) the best step if you can find out the math to add offsets from the previous method
+
+Alternative:
+- Buy a LSM9DS0: a 9-DOF IMU or any other listed at: https://github.com/adafruit/Adafruit_SensorLab/blob/master/README.md
+- Follow the newer adafruit tutorial with an ESP32 or https://learn.adafruit.com/adafruit-sensorlab-magnetometer-calibration?view=all#install-sensorlab
+Which uses sensorlab
