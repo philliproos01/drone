@@ -16,6 +16,7 @@ float elapsedTime, currentTime, previousTime;
 
 void print_data();
 
+
 class MyBoschSensor: public BoschSensorClass {
 
   public:
