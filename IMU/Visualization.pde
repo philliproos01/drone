@@ -1,3 +1,4 @@
+//Must be used with processing
 import processing.serial.*;
 import java.awt.event.KeyEvent;
 import java.io.IOException;
