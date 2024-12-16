@@ -4,7 +4,6 @@
 #include <utility/imumaths.h>
 #include <RadioLib.h>
 
-
 Adafruit_BNO055 bno = Adafruit_BNO055(55);
 SX1278 radio = new Module(33, 32, 25);
 
@@ -14,7 +13,7 @@ void print_data();
 int transmissionState = RADIOLIB_ERR_NONE;
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   
   if (!bno.begin()) {
     Serial.println("BNO055 not detected. Check wiring or I2C address!");
@@ -104,7 +103,10 @@ void loop() {
   Serial.print("/");
   Serial.println(yaw);
 
-  delay(100); // Adjust delay as needed
+
+
+
+  //delay(100); // Adjust delay as needed
 
   //send over radio
   // check if the previous transmission finished
@@ -132,9 +134,10 @@ void loop() {
     radio.finishTransmit();
 
 
-    String data = "Data: " + String(roll) + " " + String(pitch) + " " + String(yaw);
+    String data = "Data: " + String(yaw) + " " + String(pitch);
 
     transmissionState = radio.startTransmit(data);
-  
+    delay(100);
   }
+  
 }
