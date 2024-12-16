@@ -1,30 +1,44 @@
-#include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
+#include <Arduino.h>
+#include <ESP32Servo.h>
 #include <RadioLib.h>
 
-Adafruit_BNO055 bno = Adafruit_BNO055(55);
+Servo panServo;
+Servo tiltServo;
+
+const int panPin = 26;
+const int tiltPin = 27;
 SX1278 radio = new Module(33, 32, 25);
+int panAngle;
+int tiltAngle;
+
+
+volatile bool receivedFlag = false;
+
+void setFlag(void) {
+  // we got a packet, set the flag
+  receivedFlag = true;
+}
 
 void setFlag(void);
-void print_data();
-// save transmission state between loops
-int transmissionState = RADIOLIB_ERR_NONE;
+float stringToFloat(const char* str, int start, int end);
+int parseData(const char* input, float* output, int maxSize);
+
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   
-  if (!bno.begin()) {
-    Serial.println("BNO055 not detected. Check wiring or I2C address!");
-    while (1);
-  }
+
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+
+  panServo.setPeriodHertz(50);
+  tiltServo.setPeriodHertz(50);
+
+  panServo.attach(panPin, 500, 2500);
+  tiltServo.attach(tiltPin, 500, 2500);
   
-  delay(1000);
-  bno.setExtCrystalUse(true);
-
-
-  //init radio
   Serial.print(F("[SX1278] Initializing ... "));
   int state = radio.begin();
   if (state == RADIOLIB_ERR_NONE) {
@@ -32,108 +46,154 @@ void setup() {
   } else {
     Serial.print(F("failed, code "));
     Serial.println(state);
-    while (true) { delay(1); }
+    while (true) { delay(10); }
   }
+
   // set the function that will be called
-  // when packet transmission is finished
-  radio.setPacketSentAction(setFlag);
+  // when new packet is received
+  radio.setPacketReceivedAction(setFlag);
 
-  // start transmitting the first packet
-  Serial.print(F("[SX1278] Sending first packet ... "));
+  // start listening for LoRa packets
+  Serial.print(F("[SX1278] Starting to listen ... "));
+  state = radio.startReceive();
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println(F("success!"));
+  } else {
+    Serial.print(F("failed, code "));
+    Serial.println(state);
+    while (true) { delay(10); }
+  }
 
-  // you can transmit C-string or Arduino string up to
-  // 255 characters long
-  transmissionState = radio.startTransmit("accel data: ");
+
 }
-
-
-// flag to indicate that a packet was sent
-volatile bool transmittedFlag = false;
-
-// this function is called when a complete packet
-// is transmitted by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-#if defined(ESP8266) || defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-void setFlag(void) {
-  // we sent a packet, set the flag
-  transmittedFlag = true;
-}
-
-int count = 0;
 
 void loop() {
-  imu::Quaternion quat = bno.getQuat();
+  float dataArray[3];
+  const char* dataString = "Data: 0.00 1.11 2.22 3.33 4.44 5.55 6.66 7.77 8.88";
   
-  // Convert quaternion to Euler angles
-  double w = quat.w();
-  double x = quat.x();
-  double y = quat.y();
-  double z = quat.z();
-  
-  // Roll (x-axis rotation)
-  double sinr_cosp = 2 * (w * x + y * z);
-  double cosr_cosp = 1 - 2 * (x * x + y * y);
-  double roll = atan2(sinr_cosp, cosr_cosp);
-
-  // Pitch (y-axis rotation)
-  double sinp = 2 * (w * y - z * x);
-  double pitch;
-  if (abs(sinp) >= 1)
-    pitch = copysign(M_PI / 2, sinp); // Use 90 degrees if out of range
-  else
-    pitch = asin(sinp);
-
-  // Yaw (z-axis rotation)
-  double siny_cosp = 2 * (w * z + x * y);
-  double cosy_cosp = 1 - 2 * (y * y + z * z);
-  double yaw = atan2(siny_cosp, cosy_cosp);
-
-  // Convert radians to degrees
-  roll *= 180.0 / M_PI;
-  pitch *= 180.0 / M_PI;
-  yaw *= 180.0 / M_PI;
-
-  // Print roll, pitch, and yaw
-  Serial.print(roll);
-  Serial.print("/");
-  Serial.print(pitch);
-  Serial.print("/");
-  Serial.println(yaw);
-
-  delay(100); // Adjust delay as needed
-
-  //send over radio
-  // check if the previous transmission finished
-  if(transmittedFlag) {
+  // check if the flag is set
+  if(receivedFlag) {
     // reset flag
-    transmittedFlag = false;
+    receivedFlag = false;
 
-    if (transmissionState == RADIOLIB_ERR_NONE) {
-      // packet was successfully sent
-      Serial.println(F("transmission finished!"));
+    // you can read received data as an Arduino String
+    String str;
+    int state = radio.readData(str);
 
-      // NOTE: when using interrupt-driven transmit method,
-      //       it is not possible to automatically measure
-      //       transmission data rate using getDataRate()
+    // you can also read received data as byte array
+    /*
+      byte byteArr[8];
+      int numBytes = radio.getPacketLength();
+      int state = radio.readData(byteArr, numBytes);
+    */
+
+    if (state == RADIOLIB_ERR_NONE) {
+      // packet was successfully received
+      Serial.println(F("[SX1278] Received packet!"));
+
+      // print data of the packet
+      Serial.print(F("[SX1278] Data:\t\t"));
+      Serial.println(str);
+
+      // print RSSI (Received Signal Strength Indicator)
+      Serial.print(F("[SX1278] RSSI:\t\t"));
+      Serial.print(radio.getRSSI());
+      Serial.println(F(" dBm"));
+
+      // print SNR (Signal-to-Noise Ratio)
+      Serial.print(F("[SX1278] SNR:\t\t"));
+      Serial.print(radio.getSNR());
+      Serial.println(F(" dB"));
+
+      // print frequency error
+      Serial.print(F("[SX1278] Frequency error:\t"));
+      Serial.print(radio.getFrequencyError());
+      Serial.println(F(" Hz"));
+
+      int dataCount = parseData(str.c_str(), dataArray, 3);
+      Serial.print("Parsed ");
+      Serial.print(dataCount);
+      Serial.println(" values:");
+      
+    // for (int i = 0; i < dataCount; i++) {
+      //    Serial.println(dataArray[i], 2);  // Print with 2 decimal places
+    // }
+      double yaw = dataArray[1];
+      double pitch = dataArray[2];
+
+      Serial.println(dataArray[1]);
+      Serial.println(dataArray[2]);
+      
+      int panAngle = map(yaw, -180, 180, 0, 180);
+      int tiltAngle = map(pitch, -90, 90, 0, 180);
+      
+
+
+      panServo.write(panAngle);
+      tiltServo.write(tiltAngle);
+
+
+    } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+      // packet was received, but is malformed
+      Serial.println(F("[SX1278] CRC error!"));
 
     } else {
-      Serial.print(F("failed, code "));
-      Serial.println(transmissionState);
+      // some other error occurred
+      Serial.print(F("[SX1278] Failed, code "));
+      Serial.println(state);
 
     }
-
-    // clean up after transmission is finished
-    // this will ensure transmitter is disabled,
-    // RF switch is powered down etc.
-    radio.finishTransmit();
-
-
-    String data = "Data: " + String(roll) + " " + String(pitch) + " " + String(yaw);
-
-    transmissionState = radio.startTransmit(data);
   
   }
+  
+
+  
+}
+
+float stringToFloat(const char* str, int start, int end) {
+    float result = 0.0f;
+    float fraction = 0.1f;
+    bool decimal = false;
+    bool negative = false;
+    
+    for (int i = start; i < end; i++) {
+        if (str[i] == '-') {
+            negative = true;
+        } else if (str[i] == '.') {
+            decimal = true;
+        } else if (str[i] >= '0' && str[i] <= '9') {
+            if (!decimal) {
+                result = result * 10.0f + (str[i] - '0');
+            } else {
+                result += (str[i] - '0') * fraction;
+                fraction *= 0.1f;
+            }
+        }
+    }
+    
+    return negative ? -result : result;
+}
+
+// Function to parse the string and fill the float array
+int parseData(const char* input, float* output, int maxSize) {
+    int count = 0;
+    int start = 0;
+    bool dataStarted = false;
+    
+    for (int i = 0; input[i] != '\0' && count < maxSize; i++) {
+        if (!dataStarted) {
+            if (input[i] == ':') {
+                dataStarted = true;
+                start = i + 1;
+            }
+        } else {
+            if (input[i] == ' ' || input[i + 1] == '\0') {
+                int end = (input[i + 1] == '\0') ? i + 1 : i;
+                output[count++] = stringToFloat(input, start, end);
+                start = i + 1;
+            }
+        }
+    }
+    
+    return count;
 }
