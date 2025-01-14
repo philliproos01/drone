@@ -2,6 +2,7 @@ import tkinter as tk
 import tkintermapview
 import os
 from PIL import Image, ImageTk
+import requests
 
 class MapApp:
     def __init__(self, master):
@@ -67,6 +68,9 @@ class MapApp:
         for i, coords in enumerate(self.waypoints, 1):
             print(f"Waypoint {i}: Latitude {coords[0]}, Longitude {coords[1]}")
         
+        # Send waypoints to server
+        self.send_waypoints_to_server()
+        
         # Clear waypoints after submission
         self.clear_waypoints()
 
@@ -75,8 +79,7 @@ class MapApp:
 
     def clear_waypoints(self):
         # Remove all markers
-        for marker in self.map_widget.canvas_marker_list:
-            self.map_widget.delete_all_marker()
+        self.map_widget.delete_all_marker()
 
         # Clear the path
         if self.path:
@@ -86,6 +89,28 @@ class MapApp:
         # Reset waypoints list and add back the initial waypoint
         self.waypoints = [(self.initial_lat, self.initial_lon)]
         self.add_waypoint((self.initial_lat, self.initial_lon), is_initial=True)
+
+    def send_waypoints_to_server(self):
+        base_url = "http://pcr.bounceme.net/insert_temp.php"
+        
+        # Convert waypoints to string format with space between coordinate pairs
+        coords_str = " ".join([f"{lat},{lon}" for lat, lon in self.waypoints])
+        
+        params = {
+            "temperature": 605.5,  # You might want to replace this with actual temperature data
+            "id": 1,  # You might want to generate a unique ID
+            "coords": coords_str
+        }
+
+        try:
+            response = requests.get(base_url, params=params)
+            if response.status_code == 200:
+                print("Waypoints sent successfully")
+                print(response.text)
+            else:
+                print(f"Failed to send waypoints. Status code: {response.status_code}")
+        except requests.RequestException as e:
+            print(f"An error occurred while sending waypoints: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
