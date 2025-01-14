@@ -11,6 +11,7 @@ class MapApp:
 
         self.waypoints = []
         self.path = None
+        self.initial_waypoint = None  # Store the initial waypoint
 
         # Create a frame for the black box
         self.black_box = tk.Frame(self.master, bg="black", width=112)
@@ -25,8 +26,8 @@ class MapApp:
         self.map_widget.pack(pady=10)
 
         # Set initial position and zoom
-        initial_lat, initial_lon = 41.672824, -71.441307
-        self.map_widget.set_position(initial_lat, initial_lon)
+        self.initial_lat, self.initial_lon = 41.672824, -71.441307
+        self.map_widget.set_position(self.initial_lat, self.initial_lon)
         self.map_widget.set_zoom(12)
 
         # Load plane image
@@ -34,7 +35,7 @@ class MapApp:
         self.plane_image = ImageTk.PhotoImage(Image.open(os.path.join(self.current_path, "images", "plane.png")).resize((40, 40)))
 
         # Add initial waypoint with plane image
-        self.add_waypoint((initial_lat, initial_lon), is_initial=True)
+        self.add_waypoint((self.initial_lat, self.initial_lon), is_initial=True)
 
         # Bind click event to map
         self.map_widget.add_left_click_map_command(self.add_waypoint)
@@ -49,7 +50,8 @@ class MapApp:
         self.waypoints.append((lat, lon))
         marker_text = "Initial Waypoint" if is_initial else f"Waypoint {len(self.waypoints)}"
         if is_initial:
-            self.map_widget.set_marker(lat, lon, text=marker_text, icon=self.plane_image, command=self.marker_callback)
+            marker = self.map_widget.set_marker(lat, lon, text=marker_text, icon=self.plane_image, command=self.marker_callback)
+            self.initial_waypoint = marker  # Store the initial waypoint marker
         else:
             self.map_widget.set_marker(lat, lon, text=marker_text)
         self.update_path()
@@ -64,9 +66,26 @@ class MapApp:
         print("Stored Waypoints:")
         for i, coords in enumerate(self.waypoints, 1):
             print(f"Waypoint {i}: Latitude {coords[0]}, Longitude {coords[1]}")
-    
+        
+        # Clear waypoints after submission
+        self.clear_waypoints()
+
     def marker_callback(self, marker):
         print(marker.text)
+
+    def clear_waypoints(self):
+        # Remove all markers
+        for marker in self.map_widget.canvas_marker_list:
+            self.map_widget.delete_all_marker()
+
+        # Clear the path
+        if self.path:
+            self.map_widget.delete(self.path)
+            self.path = None
+
+        # Reset waypoints list and add back the initial waypoint
+        self.waypoints = [(self.initial_lat, self.initial_lon)]
+        self.add_waypoint((self.initial_lat, self.initial_lon), is_initial=True)
 
 if __name__ == "__main__":
     root = tk.Tk()
