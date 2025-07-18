@@ -958,12 +958,15 @@ class MapApp:
         draw = ImageDraw.Draw(img)
         draw.rectangle([30*s, 20*s, 70*s, 180*s], outline="white", width=int(2*s))
         draw.text((10*s, 0*s), "Altitude (ft)", fill="white")
-        for i in range(0, 16001, 4000):
-            y = 180*s - (i / 16000) * 160*s
+        # Scale: 0 to 1000 ft, ticks every 200 ft
+        for i in range(0, 1001, 200):
+            y = 180*s - (i / 1000) * 160*s
             draw.line([(30*s, y), (70*s, y)], fill="white", width=int(2*s))
             draw.text((0*s, y - 7*s), str(i), fill="white")
         altitude = self.telemetry_altitude
-        y_alt = 180*s - (altitude / 16000) * 160*s
+        # Clamp altitude to [0, 1000] for display
+        altitude = max(0, min(altitude, 1000))
+        y_alt = 180*s - (altitude / 1000) * 160*s
         draw.polygon([(70*s, y_alt), (80*s, y_alt - 10*s), (80*s, y_alt + 10*s)], fill="red")
         self.altitude_img.paste(img)
         self.altitude_canvas.itemconfig(self.altitude_canvas_img, image=self.altitude_img)
