@@ -2,19 +2,20 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import tkintermapview
 import os
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import requests
 import serial
 import serial.tools.list_ports
 import threading
 import time
 from pymavlink import mavutil
+import math
 
 class MapApp:
     def __init__(self, master):
         self.master = master
         self.master.title("Drone Map Waypoint Collector")
-        self.master.geometry("900x700")
+        self.master.geometry("1200x800")  # Increased width for telemetry
 
         # Modern color palette
         self.bg_gradient_start = "#232526"  # dark gray
@@ -36,6 +37,8 @@ class MapApp:
         self.is_connected = False
         self.current_lat = 41.672824
         self.current_lon = -71.441307
+        self.current_alt = 0.0  # Track current altitude in meters
+        self.plane_heading = 0  # Store last heading
         self.telemetry_thread = None
         self.stop_telemetry = False
 
@@ -48,25 +51,113 @@ class MapApp:
         self.black_box = tk.Frame(self.master, bg=self.panel_color, width=112)
         self.black_box.pack(side="left", fill="y")
 
+        # --- Directional and Arming Controls in Sidebar ---
+        self.sidebar_controls = tk.Frame(self.black_box, bg=self.panel_color)
+        self.sidebar_controls.pack(pady=20, padx=8, anchor="n")
+
+        # Move Forward
+        tk.Label(self.sidebar_controls, text="Forward Dist (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(0,2))
+        self.forward_distance_var = tk.StringVar(value="20.0")
+        self.forward_distance_entry = ttk.Entry(self.sidebar_controls, textvariable=self.forward_distance_var, width=8)
+        self.forward_distance_entry.pack(pady=2)
+        self.move_forward_btn = tk.Button(self.sidebar_controls, text="Move Forward", command=self.move_forward_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.move_forward_btn.pack(pady=4)
+
+        # Increase Altitude
+        tk.Label(self.sidebar_controls, text="Alt + (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(8,2))
+        self.alt_increase_var = tk.StringVar(value="2.0")
+        self.alt_increase_entry = ttk.Entry(self.sidebar_controls, textvariable=self.alt_increase_var, width=8)
+        self.alt_increase_entry.pack(pady=2)
+        self.increase_alt_btn = tk.Button(self.sidebar_controls, text="Increase Alt", command=self.increase_altitude_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.increase_alt_btn.pack(pady=4)
+
+        # Decrease Altitude
+        tk.Label(self.sidebar_controls, text="Alt - (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(8,2))
+        self.alt_decrease_var = tk.StringVar(value="2.0")
+        self.alt_decrease_entry = ttk.Entry(self.sidebar_controls, textvariable=self.alt_decrease_var, width=8)
+        self.alt_decrease_entry.pack(pady=2)
+        self.decrease_alt_btn = tk.Button(self.sidebar_controls, text="Decrease Alt", command=self.decrease_altitude_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.decrease_alt_btn.pack(pady=4)
+
+        # Rotate In Place
+        tk.Label(self.sidebar_controls, text="Rotate (deg):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(8,2))
+        self.yaw_angle_var = tk.StringVar(value="45.0")
+        self.yaw_angle_entry = ttk.Entry(self.sidebar_controls, textvariable=self.yaw_angle_var, width=8)
+        self.yaw_angle_entry.pack(pady=2)
+        self.rotate_btn = tk.Button(self.sidebar_controls, text="Rotate", command=self.rotate_in_place_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.rotate_btn.pack(pady=4)
+
+        # Translate
+        tk.Label(self.sidebar_controls, text="Trans Angle (deg):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(8,2))
+        self.translate_angle_var = tk.StringVar(value="0.0")
+        self.translate_angle_entry = ttk.Entry(self.sidebar_controls, textvariable=self.translate_angle_var, width=8)
+        self.translate_angle_entry.pack(pady=2)
+        tk.Label(self.sidebar_controls, text="Trans Dist (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(2,2))
+        self.translate_distance_var = tk.StringVar(value="10.0")
+        self.translate_distance_entry = ttk.Entry(self.sidebar_controls, textvariable=self.translate_distance_var, width=8)
+        self.translate_distance_entry.pack(pady=2)
+        self.translate_btn = tk.Button(self.sidebar_controls, text="Translate", command=self.translate_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.translate_btn.pack(pady=4)
+
+        # Manual Mode and Arm
+        self.manual_arm_var = tk.BooleanVar(value=False)
+        self.manual_arm_checkbox = ttk.Checkbutton(
+            self.sidebar_controls,
+            text="Set MANUAL mode and ARM",
+            variable=self.manual_arm_var,
+            command=self.set_manual_and_arm
+        )
+        self.manual_arm_checkbox.pack(pady=(16,4))
+
+        # --- Mission Query Button ---
+        self.query_mission_btn = tk.Button(
+            self.sidebar_controls,
+            text="Query Mission",
+            command=self.query_mission_waypoints,
+            bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2
+        )
+        self.query_mission_btn.pack(pady=8)
+
         # Create a frame for the map and controls
         self.right_frame = tk.Frame(self.master, highlightthickness=0)
         self.right_frame.pack(side="right", fill="both", expand=True)
 
+        # --- Telemetry Display Frame ---
+        self.telemetry_frame = tk.Frame(self.right_frame, bg="#181818")
+        self.telemetry_frame.pack(side="right", fill="y", padx=10, pady=10, anchor="n")
+
         # Create control panel
         self.create_control_panel()
 
+        # --- Map and Button Container ---
+        map_button_container = tk.Frame(self.right_frame)
+        map_button_container.pack(side="left", anchor="n", pady=10)
+
         # Create map widget
-        self.map_widget = tkintermapview.TkinterMapView(self.right_frame, width=788, height=500, corner_radius=12)
-        self.map_widget.pack(pady=10)
+        self.map_widget = tkintermapview.TkinterMapView(map_button_container, width=788, height=500, corner_radius=12)
+        self.map_widget.grid(row=0, column=0, pady=(0, 20))
+
+        # Centered button frame below the map
+        button_frame = tk.Frame(map_button_container)
+        button_frame.grid(row=1, column=0)
+        self.submit_button = tk.Button(button_frame, text="Submit Waypoints", command=self.submit_waypoints,
+                                       bg="green", fg="white", font=("Arial", 14), padx=20, pady=10)
+        self.submit_button.pack(side="left", padx=(0, 20))
+        self.start_mission_button = tk.Button(button_frame, text="Start Mission", command=self.start_mission,
+                                             bg="#2980b9", fg="white", font=("Arial", 14), padx=20, pady=10)
+        self.start_mission_button.pack(side="left")
 
         # Battery percentage label and icon (top right corner of map area)
         self.battery_frame = tk.Frame(self.right_frame, highlightthickness=0)
-        self.battery_frame.place(relx=1.0, y=0, anchor="ne", x=-10, rely=0.01)
+        self.battery_frame.place(relx=0.8, y=0, anchor="ne", x=-10, rely=0.01)
         self.battery_icon = tk.Canvas(self.battery_frame, width=28, height=14, highlightthickness=0)
         self.battery_icon.pack(side="left", padx=(0,2))
         self.draw_battery_icon(self.battery_icon, 100)  # Start with 100%
         self.battery_label = tk.Label(self.battery_frame, text="--%", fg=self.accent, font=("Arial", 11, "bold"))
         self.battery_label.pack(side="left")
+
+        # --- Telemetry Instruments ---
+        self.init_telemetry_instruments()
 
         # Set initial position and zoom
         self.map_widget.set_position(self.current_lat, self.current_lon)
@@ -85,10 +176,8 @@ class MapApp:
         # Bind click event to map
         self.map_widget.add_left_click_map_command(self.add_waypoint)
 
-        # Create submit button (larger and green)
-        self.submit_button = tk.Button(self.right_frame, text="Submit Waypoints", command=self.submit_waypoints,
-                                       bg="green", fg="white", font=("Arial", 14), padx=20, pady=10)
-        self.submit_button.pack(pady=10)
+        # Run test ramp for telemetry on startup
+        self.master.after(1000, self.test_ramp)
 
     def draw_gradient(self, canvas, width, height, color1, color2):
         # Simulate a vertical gradient by drawing many rectangles
@@ -225,14 +314,16 @@ class MapApp:
         print("Disconnected from MAVLink device")
 
     def telemetry_loop(self):
-        """Main telemetry loop to read GPS coordinates, heading, and battery percentage"""
+        """Main telemetry loop to read GPS coordinates, heading, battery, and attitude (roll/pitch), and update speed/altitude indicators"""
         while not self.stop_telemetry and self.mavlink_connection:
             try:
-                # Get GLOBAL_POSITION_INT message for heading and position
+                # Get GLOBAL_POSITION_INT message for heading, position, speed, and altitude
                 msg = self.mavlink_connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
                 if msg:
                     lat = msg.lat / 1e7
                     lon = msg.lon / 1e7
+                    alt = msg.alt / 1000.0  # Altitude in meters
+                    self.current_alt = alt
                     # Heading in centidegrees (0-35999), 0 = North
                     heading = getattr(msg, 'hdg', None)
                     if heading is not None and heading != 65535:
@@ -247,12 +338,31 @@ class MapApp:
                     # Update initial waypoint if this is the first GPS fix
                     if len(self.waypoints) == 1 and self.waypoints[0] == (41.672824, -71.441307):
                         self.master.after(0, self.update_initial_waypoint, lat, lon)
+                    # --- Update telemetry altitude (convert meters to feet) ---
+                    self.telemetry_altitude = alt * 3.28084
+                    # --- Update telemetry speed (ground speed in knots) ---
+                    vx = getattr(msg, 'vx', 0)
+                    vy = getattr(msg, 'vy', 0)
+                    vz = getattr(msg, 'vz', 0)
+                    # vx, vy, vz are in cm/s; ground speed is sqrt(vx^2 + vy^2)
+                    ground_speed_cms = math.sqrt(vx**2 + vy**2)
+                    ground_speed_ms = ground_speed_cms / 100.0
+                    ground_speed_knots = ground_speed_ms * 1.94384
+                    self.telemetry_speed = ground_speed_knots
                 # Also check for SYS_STATUS message for battery
                 sys_status = self.mavlink_connection.recv_match(type='SYS_STATUS', blocking=False)
                 if sys_status and hasattr(sys_status, 'battery_remaining'):
                     battery = sys_status.battery_remaining
                     if battery != -1:
                         self.master.after(0, self.update_battery_display, battery)
+                # --- Listen for ATTITUDE message for roll/pitch ---
+                att_msg = self.mavlink_connection.recv_match(type='ATTITUDE', blocking=False)
+                if att_msg:
+                    # roll, pitch in radians; convert to degrees
+                    roll_deg = math.degrees(att_msg.roll)
+                    pitch_deg = math.degrees(att_msg.pitch)
+                    self.telemetry_roll = roll_deg
+                    self.telemetry_pitch = pitch_deg
             except Exception as e:
                 print(f"Telemetry error: {e}")
                 time.sleep(0.1)
@@ -295,12 +405,104 @@ class MapApp:
         print("Stored Waypoints:")
         for i, coords in enumerate(self.waypoints, 1):
             print(f"Waypoint {i}: Latitude {coords[0]}, Longitude {coords[1]}")
-        
-        # Send waypoints to server
-        self.send_waypoints_to_server()
-        
-        # Clear waypoints after submission
-        self.clear_waypoints()
+        # Send waypoints to Pixhawk via MAVLink
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        # Run mission upload in a background thread
+        threading.Thread(target=self._threaded_send_waypoints_to_pixhawk, daemon=True).start()
+
+    def _threaded_send_waypoints_to_pixhawk(self):
+        try:
+            self.send_waypoints_to_pixhawk()
+            self.master.after(0, lambda: tk.messagebox.showinfo("Waypoints Sent", "Waypoints sent to Pixhawk via MAVLink."))
+            self.master.after(0, self.send_waypoints_to_server)
+            self.master.after(0, self.clear_waypoints)
+        except Exception as e:
+            err_msg = str(e)
+            self.master.after(0, lambda: tk.messagebox.showerror("Error", f"Failed to send waypoints to Pixhawk: {err_msg}"))
+
+    def send_waypoints_to_pixhawk(self):
+        # Clear all existing missions
+        self.mavlink_connection.mav.mission_clear_all_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component
+        )
+        time.sleep(0.5)
+        # Send mission count
+        n_wps = len(self.waypoints)
+        self.mavlink_connection.mav.mission_count_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            n_wps
+        )
+        time.sleep(0.2)
+        # Respond to MISSION_REQUEST or MISSION_REQUEST_INT for each waypoint
+        for i, (lat, lon) in enumerate(self.waypoints):
+            req_ok = False
+            for _ in range(50):  # up to 5 seconds
+                msg = self.mavlink_connection.recv_match(type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'], blocking=False)
+                if msg and msg.seq == i:
+                    req_ok = True
+                    break
+                time.sleep(0.1)
+            if not req_ok:
+                raise RuntimeError(f"Timeout waiting for MISSION_REQUEST or MISSION_REQUEST_INT for seq {i}")
+            # Always respond with MISSION_ITEM_INT (modern, preferred)
+            self.mavlink_connection.mav.mission_item_int_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                i,  # seq
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                2 if i == n_wps-1 else 0,  # current (2=auto continue, 0=not current)
+                1,  # autocontinue
+                0, 0, 0, 0,  # param1-4: hold, acceptance radius, pass radius, yaw
+                int(lat * 1e7),
+                int(lon * 1e7),
+                20 if hasattr(self, 'current_alt') and self.current_alt else 20,  # Altitude (default 20m)
+                0  # mission_type
+            )
+            time.sleep(0.05)
+        # Wait for MISSION_ACK
+        ack_ok = False
+        for _ in range(50):  # up to 5 seconds
+            msg = self.mavlink_connection.recv_match(type='MISSION_ACK', blocking=False)
+            if msg:
+                ack_ok = True
+                break
+            time.sleep(0.1)
+        if not ack_ok:
+            raise RuntimeError("Timeout waiting for MISSION_ACK after sending waypoints")
+
+    def start_mission(self):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        # PX4: AUTO.MISSION = 4, ArduPilot: AUTO = 4
+        PX4_CUSTOM_MAIN_MODE_AUTO = 4
+        MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1 << 5
+        try:
+            # 1. Send COMMAND_LONG (MAV_CMD_DO_SET_MODE)
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,  # confirmation
+                MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1: base mode
+                PX4_CUSTOM_MAIN_MODE_AUTO,          # param2: custom mode (AUTO)
+                0, 0, 0, 0, 0
+            )
+            time.sleep(0.2)
+            # 2. Send SET_MODE (for ArduPilot compatibility)
+            self.mavlink_connection.mav.set_mode_send(
+                self.mavlink_connection.target_system,
+                MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                PX4_CUSTOM_MAIN_MODE_AUTO
+            )
+            tk.messagebox.showinfo("Mission Started", "Sent commands to enter AUTO/MISSION mode.")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to start mission: {e}")
 
     def marker_callback(self, marker):
         print(marker.text)
@@ -360,6 +562,460 @@ class MapApp:
             lat, lon = self.waypoints[0]
             self.map_widget.delete(self.initial_waypoint)
             self.initial_waypoint = self.map_widget.set_marker(lat, lon, text="Drone", icon=rotated_imgtk, command=self.marker_callback)
+
+    # --- Directional Command Methods ---
+    def move_forward_from_entry(self):
+        try:
+            distance = float(self.forward_distance_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter a valid number for forward distance.")
+            return
+        self.move_forward(distance)
+
+    def move_forward(self, distance):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        heading_deg = self.plane_heading
+        heading_rad = math.radians(heading_deg)
+        earth_radius = 6378137.0
+        dlat = (distance * math.cos(heading_rad)) / earth_radius
+        dlon = (distance * math.sin(heading_rad)) / (earth_radius * math.cos(math.radians(lat)))
+        new_lat = lat + math.degrees(dlat)
+        new_lon = lon + math.degrees(dlon)
+        try:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                0, 0, 0, 0,
+                heading_rad,
+                new_lat, new_lon, alt
+            )
+            tk.messagebox.showinfo("Command Sent", f"Move to (DO_REPOSITION):\nLat: {new_lat:.7f}\nLon: {new_lon:.7f}\nAlt: {alt:.2f}")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send move forward command: {e}")
+
+    def increase_altitude_from_entry(self):
+        try:
+            increment = float(self.alt_increase_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter a valid number for altitude increase.")
+            return
+        self.increase_altitude(increment)
+
+    def increase_altitude(self, increment):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        new_alt = alt + increment
+        heading_deg = self.plane_heading
+        heading_rad = math.radians(heading_deg)
+        try:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                0, 0, 0, 0,
+                heading_rad,
+                lat, lon, new_alt
+            )
+            tk.messagebox.showinfo("Command Sent", f"Increase Altitude:\nLat: {lat:.7f}\nLon: {lon:.7f}\nAlt: {new_alt:.2f}")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send increase altitude command: {e}")
+
+    def decrease_altitude_from_entry(self):
+        try:
+            decrement = float(self.alt_decrease_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter a valid number for altitude decrease.")
+            return
+        self.decrease_altitude(decrement)
+
+    def decrease_altitude(self, decrement):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        new_alt = alt - decrement
+        heading_deg = self.plane_heading
+        heading_rad = math.radians(heading_deg)
+        try:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                0, 0, 0, 0,
+                heading_rad,
+                lat, lon, new_alt
+            )
+            tk.messagebox.showinfo("Command Sent", f"Decrease Altitude:\nLat: {lat:.7f}\nLon: {lon:.7f}\nAlt: {new_alt:.2f}")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send decrease altitude command: {e}")
+
+    def rotate_in_place_from_entry(self):
+        try:
+            yaw_angle = float(self.yaw_angle_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter a valid number for yaw angle.")
+            return
+        direction = tk.messagebox.askquestion("Rotation Direction", "Rotate right (clockwise)? Click 'No' for left (counterclockwise).", icon='question')
+        if direction == 'yes':
+            self.rotate_in_place(yaw_angle)
+        else:
+            self.rotate_in_place(-yaw_angle)
+
+    def rotate_in_place(self, yaw_angle):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        # Update heading
+        new_heading = (self.plane_heading + yaw_angle) % 360
+        target_heading_rad = math.radians(new_heading)
+        try:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                0, 0, 0, 0,
+                target_heading_rad,
+                lat, lon, alt
+            )
+            self.plane_heading = new_heading  # Update local heading
+            tk.messagebox.showinfo("Command Sent", f"Rotating in place to heading {new_heading:.1f} degrees")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send rotate command: {e}")
+
+    def translate_from_entry(self):
+        try:
+            angle = float(self.translate_angle_var.get())
+            distance = float(self.translate_distance_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter valid numbers for angle and distance.")
+            return
+        self.translate(angle, distance)
+
+    def translate(self, angle, distance):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        heading_deg = self.plane_heading
+        move_direction_deg = (heading_deg + angle) % 360
+        move_direction_rad = math.radians(move_direction_deg)
+        earth_radius = 6378137.0
+        dlat = (distance * math.cos(move_direction_rad)) / earth_radius
+        dlon = (distance * math.sin(move_direction_rad)) / (earth_radius * math.cos(math.radians(lat)))
+        new_lat = lat + math.degrees(dlat)
+        new_lon = lon + math.degrees(dlon)
+        heading_rad = math.radians(heading_deg)
+        try:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                0, 0, 0, 0,
+                heading_rad,
+                new_lat, new_lon, alt
+            )
+            tk.messagebox.showinfo("Command Sent", f"Translate {distance}m at {angle}° rel. to heading (abs: {move_direction_deg:.1f}°)\nLat: {new_lat:.7f}\nLon: {new_lon:.7f}\nAlt: {alt:.2f}")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send translate command: {e}")
+
+    def set_manual_and_arm(self):
+        if self.manual_arm_var.get():
+            PX4_CUSTOM_MAIN_MODE_MANUAL = 1
+            PX4_CUSTOM_MAIN_MODE_TAKEOFF = 4
+            MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1 << 5
+            try:
+                self.mavlink_connection.mav.command_long_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                    0,  # confirmation
+                    MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1: base mode
+                    PX4_CUSTOM_MAIN_MODE_MANUAL,        # param2: custom mode
+                    0, 0, 0, 0, 0
+                )
+                time.sleep(1)
+                # Arm the drone
+                self.mavlink_connection.mav.command_long_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,  # confirmation
+                    1,  # param1: 1 to arm
+                    0, 0, 0, 0, 0, 0
+                )
+                time.sleep(5)  # 5 second delay
+                # Switch to TAKEOFF mode (PX4 custom main mode 4)
+                self.mavlink_connection.mav.command_long_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                    0,  # confirmation
+                    MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1: base mode
+                    PX4_CUSTOM_MAIN_MODE_TAKEOFF,       # param2: custom mode
+                    0, 0, 0, 0, 0
+                )
+                # Automatically increase altitude by 5 meters
+                self.increase_altitude(5)
+                tk.messagebox.showinfo("Command Sent", "Set to MANUAL mode, ARMED, switched to TAKEOFF mode, and increased altitude by 5 meters.")
+            except Exception as e:
+                tk.messagebox.showerror("Error", f"Failed to set MANUAL mode, arm, switch to TAKEOFF, and increase altitude: {e}")
+
+    # --- Mission Query Function ---
+    def query_mission_waypoints(self):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        try:
+            # Request mission count
+            self.mavlink_connection.mav.mission_request_list_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component
+            )
+            # Wait for mission count
+            count = None
+            for _ in range(50):  # up to 5 seconds
+                msg = self.mavlink_connection.recv_match(type='MISSION_COUNT', blocking=True, timeout=0.1)
+                if msg:
+                    count = msg.count
+                    break
+            if count is None:
+                print("Timeout waiting for MISSION_COUNT")
+                tk.messagebox.showerror("Error", "Timeout waiting for MISSION_COUNT.")
+                return
+            print(f"Mission has {count} waypoints:")
+            # Request and print each waypoint
+            waypoints = []
+            for seq in range(count):
+                self.mavlink_connection.mav.mission_request_int_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    seq
+                )
+                for _ in range(50):
+                    msg = self.mavlink_connection.recv_match(type=['MISSION_ITEM', 'MISSION_ITEM_INT'], blocking=True, timeout=0.1)
+                    if msg and msg.seq == seq:
+                        if hasattr(msg, 'x') and hasattr(msg, 'y'):
+                            lat = msg.x / 1e7
+                            lon = msg.y / 1e7
+                        elif hasattr(msg, 'param5') and hasattr(msg, 'param6'):
+                            lat = msg.param5
+                            lon = msg.param6
+                        else:
+                            lat = lon = None
+                        waypoints.append((lat, lon))
+                        print(f"  Waypoint {seq}: Lat {lat}, Lon {lon}")
+                        break
+            print(f"Total waypoints received: {len(waypoints)}")
+        except Exception as e:
+            print(f"Error querying mission waypoints: {e}")
+            tk.messagebox.showerror("Error", f"Failed to query mission: {e}")
+
+    def init_telemetry_instruments(self):
+        # Import PIL.ImageDraw here if not already
+        s = 1.0
+        # Gyroscope
+        self.gyro_canvas = tk.Canvas(self.telemetry_frame, width=int(200*s), height=int(200*s), bg='black', highlightthickness=0)
+        self.gyro_canvas.pack(pady=(0,10))
+        self.gyro_img = ImageTk.PhotoImage(Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 255)))
+        self.gyro_canvas_img = self.gyro_canvas.create_image(0, 0, anchor="nw", image=self.gyro_img)
+        # Speedometer
+        self.speed_canvas = tk.Canvas(self.telemetry_frame, width=int(200*s), height=int(200*s), bg='black', highlightthickness=0)
+        self.speed_canvas.pack(pady=(0,10))
+        self.speed_img = ImageTk.PhotoImage(Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 255)))
+        self.speed_canvas_img = self.speed_canvas.create_image(0, 0, anchor="nw", image=self.speed_img)
+        # Altitude
+        self.altitude_canvas = tk.Canvas(self.telemetry_frame, width=int(100*s), height=int(200*s), bg='black', highlightthickness=0)
+        self.altitude_canvas.pack()
+        self.altitude_img = ImageTk.PhotoImage(Image.new("RGBA", (int(100*s), int(200*s)), (0, 0, 0, 255)))
+        self.altitude_canvas_img = self.altitude_canvas.create_image(0, 0, anchor="nw", image=self.altitude_img)
+        # Telemetry values
+        self.telemetry_speed = 0
+        self.telemetry_altitude = 0
+        self.telemetry_pitch = 0
+        self.telemetry_roll = 0
+        self._telemetry_running = True
+        self.master.after(16, self.update_telemetry_instruments)
+
+    def update_telemetry_instruments(self):
+        s = 1.0
+        # Draw gyroscope
+        img = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(img)
+        center_x, center_y = int(100*s), int(100*s)
+        radius = int(90*s)
+        pitch_offset = self.telemetry_pitch * 2 * s
+        sky_bottom = max(0, min(int(200*s), int(100*s + pitch_offset)))
+        earth_top = sky_bottom
+        draw.rectangle([0, 0, int(200*s), sky_bottom], fill="skyblue")
+        draw.rectangle([0, earth_top, int(200*s), int(200*s)], fill="saddlebrown")
+        img = img.rotate(-self.telemetry_roll, center=(center_x, center_y), resample=Image.BICUBIC, expand=False)
+        mask = Image.new("L", (int(200*s), int(200*s)), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse([center_x - radius, center_y - radius, center_x + radius, center_y + radius], fill=255)
+        img.putalpha(mask)
+        ladder_img = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 0))
+        ladder_draw = ImageDraw.Draw(ladder_img)
+        ladder_width = 30*s*0.5
+        tick_width = 40*s*0.5
+        number_offset = 10*s
+        for pitch in range(-50, 55, 5):
+            if pitch == 0:
+                continue
+            offset = pitch * 2 * s
+            y = center_y + pitch_offset - offset
+            if (y < center_y - radius) or (y > center_y + radius):
+                continue
+            ladder_draw.line([(center_x - ladder_width, y), (center_x + ladder_width, y)], fill="white", width=int(2*s))
+            if pitch % 10 == 0:
+                ladder_draw.line([(center_x - tick_width, y), (center_x + tick_width, y)], fill="white", width=int(2*s))
+            ladder_draw.text((center_x - ladder_width - number_offset, y - 7*s), str(abs(pitch)), fill="white")
+            ladder_draw.text((center_x + ladder_width + 2, y - 7*s), str(abs(pitch)), fill="white")
+        ladder_img = ladder_img.rotate(-self.telemetry_roll, center=(center_x, center_y), resample=Image.BICUBIC, expand=False)
+        ladder_img_masked = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 0))
+        ladder_img_masked.paste(ladder_img, (0, 0), mask)
+        roll_img = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 0))
+        roll_draw = ImageDraw.Draw(roll_img)
+        for angle, label in [(-60, "60"), (-50, ""), (-45, "45"), (-40, ""), (-30, "30"), (-20, ""), (-10, ""), (0, ""), (10, ""), (20, ""), (30, "30"), (40, ""), (45, "45"), (50, ""), (60, "60")]:
+            rad = math.radians(angle)
+            x1 = center_x + (radius - 5*s) * math.sin(rad)
+            y1 = center_y - (radius - 5*s) * math.cos(rad)
+            x2 = center_x + (radius - 15*s) * math.sin(rad)
+            y2 = center_y - (radius - 15*s) * math.cos(rad)
+            roll_draw.line([(x1, y1), (x2, y2)], fill="white", width=int(2*s))
+            if label:
+                lx = center_x + (radius - 25*s) * math.sin(rad)
+                ly = center_y - (radius - 25*s) * math.cos(rad)
+                roll_draw.text((lx, ly), label, fill="white")
+        roll_img = roll_img.rotate(-self.telemetry_roll, center=(center_x, center_y), resample=Image.BICUBIC, expand=False)
+        roll_img_masked = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 0))
+        roll_img_masked.paste(roll_img, (0, 0), mask)
+        final_img = Image.alpha_composite(img, ladder_img_masked)
+        final_img = Image.alpha_composite(final_img, roll_img_masked)
+        # --- Draw red arrow indicator (center arrowhead) ---
+        arrow_img = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 0))
+        arrow_draw = ImageDraw.Draw(arrow_img)
+        base_width = 30 * s
+        height = 12.5 * s
+        cx, cy = center_x, center_y
+        arrow_points = [
+            (cx - base_width // 2, cy + height // 2),
+            (cx + base_width // 2, cy + height // 2),
+            (cx, cy - height)
+        ]
+        arrow_draw.polygon(arrow_points, fill="red")
+        final_img = Image.alpha_composite(final_img, arrow_img)
+        self.gyro_img.paste(final_img)
+        self.gyro_canvas.itemconfig(self.gyro_canvas_img, image=self.gyro_img)
+        # Draw static overlays
+        c = self.gyro_canvas
+        c.delete("static")
+        c.create_polygon(center_x - 8*s, center_y - radius + 6*s, center_x + 8*s, center_y - radius + 6*s, center_x, center_y - radius - 8*s, fill="white", tags="static")
+        c.create_line(center_x - 20*s, center_y + 40*s, center_x + 20*s, center_y + 40*s, fill="white", width=int(4*s), tags="static")
+        c.create_line(center_x, center_y + 40*s, center_x, center_y + 30*s, fill="white", width=int(4*s), tags="static")
+        c.create_oval(center_x - 5*s, center_y + radius - 15*s, center_x + 5*s, center_y + radius - 5*s, fill="white", tags="static")
+        c.create_line(center_x, center_y - radius + 10*s, center_x, center_y + radius - 10*s, fill="yellow", width=int(2*s), tags="static")
+        # Speedometer
+        img = Image.new("RGBA", (int(200*s), int(200*s)), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([10*s, 10*s, 190*s, 190*s], outline="white", width=int(2*s))
+        draw.text((60*s, 5*s), "Speed (knots)", fill="white")
+        for i in range(0, 181, 20):
+            angle = math.radians(180 - i)
+            x_start = 100*s + 80*s * math.cos(angle)
+            y_start = 100*s - 80*s * math.sin(angle)
+            x_end = 100*s + 90*s * math.cos(angle)
+            y_end = 100*s - 90*s * math.sin(angle)
+            draw.line([(x_start, y_start), (x_end, y_end)], fill="white", width=int(2*s))
+            tx = 100*s + 65*s * math.cos(angle)
+            ty = 100*s - 65*s * math.sin(angle)
+            draw.text((tx - 8*s, ty - 7*s), str(i), fill="white")
+        speed = self.telemetry_speed
+        angle = math.radians(180 - speed)
+        x_needle = 100*s + 70*s * math.cos(angle)
+        y_needle = 100*s - 70*s * math.sin(angle)
+        draw.line([(100*s, 100*s), (x_needle, y_needle)], fill="red", width=int(3*s))
+        self.speed_img.paste(img)
+        self.speed_canvas.itemconfig(self.speed_canvas_img, image=self.speed_img)
+        # Altitude
+        img = Image.new("RGBA", (int(100*s), int(200*s)), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([30*s, 20*s, 70*s, 180*s], outline="white", width=int(2*s))
+        draw.text((10*s, 0*s), "Altitude (ft)", fill="white")
+        for i in range(0, 16001, 4000):
+            y = 180*s - (i / 16000) * 160*s
+            draw.line([(30*s, y), (70*s, y)], fill="white", width=int(2*s))
+            draw.text((0*s, y - 7*s), str(i), fill="white")
+        altitude = self.telemetry_altitude
+        y_alt = 180*s - (altitude / 16000) * 160*s
+        draw.polygon([(70*s, y_alt), (80*s, y_alt - 10*s), (80*s, y_alt + 10*s)], fill="red")
+        self.altitude_img.paste(img)
+        self.altitude_canvas.itemconfig(self.altitude_canvas_img, image=self.altitude_img)
+        if self._telemetry_running:
+            self.master.after(16, self.update_telemetry_instruments)
+
+    def test_ramp(self):
+        def ramp():
+            max_speed = 180
+            max_altitude = 16000
+            max_pitch = 60
+            max_roll = 90
+            step = 2
+            original_pitch = self.telemetry_pitch
+            original_roll = self.telemetry_roll
+            for i in range(0, 101, step):
+                self.telemetry_speed = max_speed * i / 100
+                self.telemetry_altitude = max_altitude * i / 100
+                self.telemetry_pitch = original_pitch
+                self.telemetry_roll = original_roll
+                time.sleep(0.02)
+            for i in range(100, -1, -step):
+                self.telemetry_speed = max_speed * i / 100
+                self.telemetry_altitude = max_altitude * i / 100
+                self.telemetry_pitch = original_pitch
+                self.telemetry_roll = original_roll
+                time.sleep(0.02)
+            for i in range(0, 101, step):
+                self.telemetry_roll = -max_roll * i / 100
+                self.telemetry_pitch = 0
+                time.sleep(0.02)
+            for i in range(0, 101, step):
+                self.telemetry_roll = -max_roll + (2 * max_roll * i / 100)
+                self.telemetry_pitch = 0
+                time.sleep(0.02)
+            for i in range(0, 101, step):
+                self.telemetry_roll = max_roll - (max_roll * i / 100)
+                self.telemetry_pitch = 0
+                time.sleep(0.02)
+            self.telemetry_roll = 0
+            for i in range(0, 101, step):
+                self.telemetry_pitch = max_pitch * i / 100
+                time.sleep(0.02)
+            for i in range(0, 101, step):
+                self.telemetry_pitch = max_pitch - (2 * max_pitch * i / 100)
+                time.sleep(0.02)
+            for i in range(0, 101, step):
+                self.telemetry_pitch = -max_pitch + (max_pitch * i / 100)
+                time.sleep(0.02)
+            self.telemetry_pitch = 0
+            self.telemetry_roll = 0
+        threading.Thread(target=ramp, daemon=True).start()
 
 if __name__ == "__main__":
     root = tk.Tk()
