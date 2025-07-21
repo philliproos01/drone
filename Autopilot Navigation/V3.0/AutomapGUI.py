@@ -170,8 +170,9 @@ class MapApp:
         self.plane_heading = 0  # Store last heading
         self.plane_image_cache = {}
 
-        # Add initial waypoint with plane image
-        self.add_waypoint((self.current_lat, self.current_lon), is_initial=True)
+        # Add live drone marker (plane icon) -- will be updated with telemetry
+        self.drone_marker = None
+        self.update_drone_marker(self.current_lat, self.current_lon, self.plane_heading)
 
         # Bind click event to map
         self.map_widget.add_left_click_map_command(self.add_waypoint)
@@ -294,6 +295,9 @@ class MapApp:
 
             print(f"Connected to MAVLink device on {com_port}")
 
+            # Center and zoom the map on the drone's current location 3 seconds after connect
+            self.master.after(3000, self.zoom_to_drone_location)
+
         except Exception as e:
             tk.messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
             print(f"Connection error: {e}")
@@ -333,11 +337,10 @@ class MapApp:
                     # Update current position
                     self.current_lat = lat
                     self.current_lon = lon
+                    # Update drone marker on the map
+                    self.master.after(0, self.update_drone_marker, lat, lon, self.plane_heading)
                     # Update GUI in main thread
                     self.master.after(0, self.update_position_display, lat, lon)
-                    # Update initial waypoint if this is the first GPS fix
-                    if len(self.waypoints) == 1 and self.waypoints[0] == (41.672824, -71.441307):
-                        self.master.after(0, self.update_initial_waypoint, lat, lon)
                     # --- Update telemetry altitude (convert meters to feet) ---
                     self.telemetry_altitude = alt * 3.28084
                     # --- Update telemetry speed (ground speed in knots) ---
@@ -384,15 +387,15 @@ class MapApp:
         # Center map on new position
         self.map_widget.set_position(lat, lon)
 
-    def add_waypoint(self, coords, is_initial=False):
+    def add_waypoint(self, coords):
         lat, lon = coords
+        # If this is the first waypoint, use the drone's current location
+        if not self.waypoints:
+            lat = self.current_lat
+            lon = self.current_lon
         self.waypoints.append((lat, lon))
-        marker_text = "Initial Waypoint" if is_initial else f"Waypoint {len(self.waypoints)}"
-        if is_initial:
-            marker = self.map_widget.set_marker(lat, lon, text=marker_text, icon=self.plane_image, command=self.marker_callback)
-            self.initial_waypoint = marker  # Store the initial waypoint marker
-        else:
-            self.map_widget.set_marker(lat, lon, text=marker_text)
+        marker_text = f"Waypoint {len(self.waypoints)}"
+        self.map_widget.set_marker(lat, lon, text=marker_text)
         self.update_path()
 
     def update_path(self):
@@ -548,7 +551,10 @@ class MapApp:
         self.draw_battery_icon(self.battery_icon, battery_percent)
 
     def update_plane_heading(self, heading_deg):
-        """Rotate the plane image and update the initial waypoint marker icon"""
+        """Rotate the plane image and update the drone marker icon at the current GPS location"""
+        self.update_drone_marker(self.current_lat, self.current_lon, heading_deg)
+
+    def update_drone_marker(self, lat, lon, heading_deg):
         # Cache rotated images for performance
         heading_int = int(heading_deg)
         if heading_int in self.plane_image_cache:
@@ -557,11 +563,27 @@ class MapApp:
             rotated_img = self.plane_image_orig.rotate(-heading_deg, resample=Image.BICUBIC, expand=True)
             rotated_imgtk = ImageTk.PhotoImage(rotated_img)
             self.plane_image_cache[heading_int] = rotated_imgtk
-        # Update the marker icon by deleting and recreating the marker
-        if self.initial_waypoint and self.waypoints:
-            lat, lon = self.waypoints[0]
-            self.map_widget.delete(self.initial_waypoint)
-            self.initial_waypoint = self.map_widget.set_marker(lat, lon, text="Drone", icon=rotated_imgtk, command=self.marker_callback)
+
+        # Only update or recreate the drone marker
+        if self.drone_marker is not None:
+            try:
+                # Try to update position and icon if supported
+                if hasattr(self.drone_marker, 'set_position'):
+                    self.drone_marker.set_position(lat, lon)
+                else:
+                    # If not supported, recreate
+                    raise AttributeError
+                if hasattr(self.drone_marker, 'set_icon'):
+                    self.drone_marker.set_icon(rotated_imgtk)
+            except Exception:
+                # If not supported, delete and recreate
+                try:
+                    self.map_widget.delete(self.drone_marker)
+                except Exception:
+                    pass
+                self.drone_marker = self.map_widget.set_marker(lat, lon, text="Drone", icon=rotated_imgtk)
+        else:
+            self.drone_marker = self.map_widget.set_marker(lat, lon, text="Drone", icon=rotated_imgtk)
 
     # --- Directional Command Methods ---
     def move_forward_from_entry(self):
@@ -1019,6 +1041,10 @@ class MapApp:
             self.telemetry_pitch = 0
             self.telemetry_roll = 0
         threading.Thread(target=ramp, daemon=True).start()
+
+    def zoom_to_drone_location(self):
+        self.map_widget.set_position(self.current_lat, self.current_lon)
+        self.map_widget.set_zoom(18)
 
 if __name__ == "__main__":
     root = tk.Tk()
