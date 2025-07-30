@@ -55,6 +55,17 @@ class MapApp:
         self.sidebar_controls = tk.Frame(self.black_box, bg=self.panel_color)
         self.sidebar_controls.pack(pady=20, padx=8, anchor="n")
 
+        # Flight mode display (above movement commands)
+        self.flight_mode_var = tk.StringVar(value="Flight Mode: --")
+        self.flight_mode_label = tk.Label(
+            self.sidebar_controls,
+            textvariable=self.flight_mode_var,
+            bg=self.panel_color,
+            fg=self.accent,
+            font=("Arial", 11, "bold")
+        )
+        self.flight_mode_label.pack(pady=(0, 12))
+
         # Move Forward
         tk.Label(self.sidebar_controls, text="Forward Dist (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(0,2))
         self.forward_distance_var = tk.StringVar(value="20.0")
@@ -99,11 +110,23 @@ class MapApp:
         self.translate_btn = tk.Button(self.sidebar_controls, text="Translate", command=self.translate_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
         self.translate_btn.pack(pady=4)
 
+        # Orbit
+        tk.Label(self.sidebar_controls, text="Orbit Radius (m):", bg=self.panel_color, fg=self.button_fg, font=("Arial", 9)).pack(pady=(8,2))
+        self.orbit_radius_var = tk.StringVar(value="20.0")
+        self.orbit_radius_entry = ttk.Entry(self.sidebar_controls, textvariable=self.orbit_radius_var, width=8)
+        self.orbit_radius_entry.pack(pady=2)
+        self.orbit_btn = tk.Button(self.sidebar_controls, text="Start Orbit", command=self.orbit_from_entry, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.orbit_btn.pack(pady=4)
+
+        # Loiter
+        self.loiter_btn = tk.Button(self.sidebar_controls, text="LOITER", command=self.loiter, bg=self.button_color, fg=self.button_fg, font=("Arial", 8), relief="flat", bd=0, padx=6, pady=2)
+        self.loiter_btn.pack(pady=4)
+
         # Manual Mode and Arm
         self.manual_arm_var = tk.BooleanVar(value=False)
         self.manual_arm_checkbox = ttk.Checkbutton(
             self.sidebar_controls,
-            text="Set MANUAL mode and ARM",
+            text="ARM & TAKEOFF",
             variable=self.manual_arm_var,
             command=self.set_manual_and_arm
         )
@@ -173,6 +196,9 @@ class MapApp:
         # Add live drone marker (plane icon) -- will be updated with telemetry
         self.drone_marker = None
         self.update_drone_marker(self.current_lat, self.current_lon, self.plane_heading)
+
+        # Track waypoint markers separately
+        self.waypoint_markers = []
 
         # Bind click event to map
         self.map_widget.add_left_click_map_command(self.add_waypoint)
@@ -298,6 +324,9 @@ class MapApp:
             # Center and zoom the map on the drone's current location 3 seconds after connect
             self.master.after(3000, self.zoom_to_drone_location)
 
+            # Start flight mode polling
+            self.master.after(1000, self.update_flight_mode_display)
+
         except Exception as e:
             tk.messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
             print(f"Connection error: {e}")
@@ -315,6 +344,8 @@ class MapApp:
         self.is_connected = False
         self.connect_button.config(text="Connect", bg=self.status_disconnected)
         self.status_label.config(text="Disconnected", fg=self.status_disconnected)
+        # Reset flight mode display
+        self.flight_mode_var.set("Flight Mode: --")
         print("Disconnected from MAVLink device")
 
     def telemetry_loop(self):
@@ -381,7 +412,7 @@ class MapApp:
             self.map_widget.delete(self.initial_waypoint)
         # Clear waypoints and add new initial position
         self.waypoints = [(lat, lon)]
-        self.add_waypoint((lat, lon), is_initial=True)
+        self.add_waypoint((lat, lon))
         # After adding, update the heading icon if available
         self.update_plane_heading(self.plane_heading)
         # Center map on new position
@@ -395,7 +426,8 @@ class MapApp:
             lon = self.current_lon
         self.waypoints.append((lat, lon))
         marker_text = f"Waypoint {len(self.waypoints)}"
-        self.map_widget.set_marker(lat, lon, text=marker_text)
+        marker = self.map_widget.set_marker(lat, lon, text=marker_text)
+        self.waypoint_markers.append(marker)
         self.update_path()
 
     def update_path(self):
@@ -482,11 +514,42 @@ class MapApp:
         if not self.mavlink_connection:
             tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
             return
-        # PX4: AUTO.MISSION = 4, ArduPilot: AUTO = 4
-        PX4_CUSTOM_MAIN_MODE_AUTO = 4
-        MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1 << 5
+        
         try:
-            # 1. Send COMMAND_LONG (MAV_CMD_DO_SET_MODE)
+            # Step 1: Arm the drone
+            print("Arming drone...")
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,  # confirmation
+                1,  # param1: 1 to arm
+                0, 0, 0, 0, 0, 0
+            )
+            time.sleep(2)  # Wait for arming
+            
+            # Step 2: Send takeoff command
+            print("Sending takeoff command...")
+            try:
+                current_alt = float(self.current_alt)
+            except Exception:
+                current_alt = 0
+            takeoff_alt = max(current_alt + 5, 10)  # At least 5m above current or 10m minimum
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0, 0, 0, 0, 0,
+                self.current_lat,
+                self.current_lon,
+                takeoff_alt
+            )
+            time.sleep(3)  # Wait for takeoff
+            
+            # Step 3: Set flight mode to AUTO/MISSION
+            print("Setting flight mode to AUTO/MISSION...")
+            PX4_CUSTOM_MAIN_MODE_AUTO = 4
+            MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1 << 5
             self.mavlink_connection.mav.command_long_send(
                 self.mavlink_connection.target_system,
                 self.mavlink_connection.target_component,
@@ -496,32 +559,61 @@ class MapApp:
                 PX4_CUSTOM_MAIN_MODE_AUTO,          # param2: custom mode (AUTO)
                 0, 0, 0, 0, 0
             )
-            time.sleep(0.2)
-            # 2. Send SET_MODE (for ArduPilot compatibility)
-            self.mavlink_connection.mav.set_mode_send(
+            time.sleep(1)  # Wait for mode change
+            
+            # Step 4: Send MAV_CMD_MISSION_START
+            print("Starting mission...")
+            self.mavlink_connection.mav.command_long_send(
                 self.mavlink_connection.target_system,
-                MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                PX4_CUSTOM_MAIN_MODE_AUTO
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_MISSION_START,
+                0,  # confirmation
+                0,  # param1: first mission item to run
+                0, 0, 0, 0, 0, 0
             )
-            tk.messagebox.showinfo("Mission Started", "Sent commands to enter AUTO/MISSION mode.")
+            
+            tk.messagebox.showinfo("Mission Started", "Sent commands to arm, takeoff, set AUTO mode, and start mission.")
+            # Update flight mode display immediately after starting mission
+            self.update_flight_mode_display()
+            
         except Exception as e:
             tk.messagebox.showerror("Error", f"Failed to start mission: {e}")
+            print(f"Mission start error: {e}")
 
     def marker_callback(self, marker):
         print(marker.text)
 
     def clear_waypoints(self):
-        # Remove all markers
-        self.map_widget.delete_all_marker()
+        # Remove all waypoint markers (but not the drone marker)
+        for marker in self.waypoint_markers:
+            try:
+                self.map_widget.delete(marker)
+            except Exception:
+                pass
+        self.waypoint_markers = []
+
+        # Optionally, update the drone marker to the latest location
+        lat, lon, heading = self.current_lat, self.current_lon, self.plane_heading
+        if self.mavlink_connection:
+            try:
+                msg = self.mavlink_connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
+                if msg:
+                    lat = msg.lat / 1e7
+                    lon = msg.lon / 1e7
+                    heading = getattr(msg, 'hdg', heading)
+                    if heading is not None and heading != 65535:
+                        heading = heading / 100.0
+            except Exception:
+                pass
+        self.update_drone_marker(lat, lon, heading)
 
         # Clear the path
         if self.path:
             self.map_widget.delete(self.path)
             self.path = None
 
-        # Reset waypoints list and add back the initial waypoint
-        self.waypoints = [(self.current_lat, self.current_lon)]
-        self.add_waypoint((self.current_lat, self.current_lon), is_initial=True)
+        # Reset waypoints list (no waypoints after clearing)
+        self.waypoints = []
 
     def send_waypoints_to_server(self):
         base_url = "http://pcr.bounceme.net/insert_temp.php"
@@ -757,6 +849,101 @@ class MapApp:
         except Exception as e:
             tk.messagebox.showerror("Error", f"Failed to send translate command: {e}")
 
+    def orbit_from_entry(self):
+        try:
+            radius = float(self.orbit_radius_var.get())
+        except ValueError:
+            tk.messagebox.showerror("Input Error", "Please enter a valid number for orbit radius.")
+            return
+        self.orbit(radius)
+
+    def orbit(self, radius):
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        lat = self.current_lat
+        lon = self.current_lon
+        alt = self.current_alt
+        try:
+            # MAV_CMD_DO_ORBIT: param1=radius, param2=velocity, param3=yaw_behavior, param4=orbits, param5=latitude, param6=longitude, param7=altitude
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                34,  # MAV_CMD_DO_ORBIT (raw command number)
+                0,  # confirmation
+                radius,  # param1: radius in meters
+                0,  # param2: velocity (0 = use default)
+                0,  # param3: yaw behavior (0 = face center)
+                1,  # param4: number of orbits (default 1)
+                int(lat * 1e7),  # param5: latitude (degrees * 1e7)
+                int(lon * 1e7),  # param6: longitude (degrees * 1e7)
+                alt  # param7: altitude in meters
+            )
+            tk.messagebox.showinfo("Orbit Command Sent", f"Starting orbit at current position with {radius:.1f}m radius")
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send orbit command: {e}")
+
+    def loiter(self):
+        from pymavlink import mavutil
+        if not self.mavlink_connection:
+            tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
+            return
+        try:
+            PX4_CUSTOM_MAIN_MODE_MANUAL = 1
+            PX4_CUSTOM_MAIN_MODE_LOITER = 5
+            MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1 << 5
+            # Set MANUAL mode
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,  # confirmation
+                MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1: base mode
+                PX4_CUSTOM_MAIN_MODE_MANUAL,        # param2: custom mode
+                0, 0, 0, 0, 0
+            )
+            time.sleep(1)
+            # Arm the drone
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,  # confirmation
+                1,  # param1: 1 to arm
+                0, 0, 0, 0, 0, 0
+            )
+            time.sleep(2)  # 2 second delay
+            # Switch to LOITER mode (PX4 custom main mode 5)
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0,  # confirmation
+                MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1: base mode
+                PX4_CUSTOM_MAIN_MODE_LOITER,       # param2: custom mode
+                0, 0, 0, 0, 0
+            )
+            time.sleep(1)
+            # Explicitly send MAV_CMD_NAV_TAKEOFF
+            try:
+                current_alt = float(self.current_alt)
+            except Exception:
+                current_alt = 0
+            takeoff_alt = max(current_alt + 2, current_alt + 0.1) if current_alt > 0 else 5
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0, 0, 0, 0, 0,
+                self.current_lat,
+                self.current_lon,
+                takeoff_alt
+            )
+            # Immediately after, send a MAVLink command to increase altitude by 2 meters
+            self.increase_altitude(2)
+        except Exception as e:
+            tk.messagebox.showerror("Error", f"Failed to send loiter command: {e}")
+
     def set_manual_and_arm(self):
         if self.manual_arm_var.get():
             PX4_CUSTOM_MAIN_MODE_MANUAL = 1
@@ -782,7 +969,7 @@ class MapApp:
                     1,  # param1: 1 to arm
                     0, 0, 0, 0, 0, 0
                 )
-                time.sleep(5)  # 5 second delay
+                time.sleep(2)  # 2 second delay
                 # Switch to TAKEOFF mode (PX4 custom main mode 4)
                 self.mavlink_connection.mav.command_long_send(
                     self.mavlink_connection.target_system,
@@ -793,61 +980,117 @@ class MapApp:
                     PX4_CUSTOM_MAIN_MODE_TAKEOFF,       # param2: custom mode
                     0, 0, 0, 0, 0
                 )
-                # Automatically increase altitude by 5 meters
-                self.increase_altitude(5)
-                tk.messagebox.showinfo("Command Sent", "Set to MANUAL mode, ARMED, switched to TAKEOFF mode, and increased altitude by 5 meters.")
+                time.sleep(1)
+                # Explicitly send MAV_CMD_NAV_TAKEOFF
+                # Takeoff altitude: at least 2 meters above current altitude
+                try:
+                    current_alt = float(self.current_alt)
+                except Exception:
+                    current_alt = 0
+                takeoff_alt = max(current_alt + 2, current_alt + 0.1) if current_alt > 0 else 5
+                self.mavlink_connection.mav.command_long_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                    0, 0, 0, 0, 0,
+                    self.current_lat,
+                    self.current_lon,
+                    takeoff_alt
+                )
             except Exception as e:
-                tk.messagebox.showerror("Error", f"Failed to set MANUAL mode, arm, switch to TAKEOFF, and increase altitude: {e}")
+                pass
+            # Immediately after, send a MAVLink command to increase altitude by 2 meters
+            self.increase_altitude(2)
+            # Update flight mode display immediately after arming/takeoff
+            self.update_flight_mode_display()
 
     # --- Mission Query Function ---
     def query_mission_waypoints(self):
         if not self.mavlink_connection:
             tk.messagebox.showerror("Error", "Not connected to MAVLink device.")
             return
+        threading.Thread(target=self._threaded_query_mission_waypoints, daemon=True).start()
+
+    def _threaded_query_mission_waypoints(self):
         try:
-            # Request mission count
-            self.mavlink_connection.mav.mission_request_list_send(
-                self.mavlink_connection.target_system,
-                self.mavlink_connection.target_component
-            )
-            # Wait for mission count
+            # Clear MAVLink message buffer
+            while self.mavlink_connection.recv_match(blocking=False):
+                pass
+
+            # Retry logic for MISSION_REQUEST_LIST and MISSION_COUNT
             count = None
-            for _ in range(50):  # up to 5 seconds
-                msg = self.mavlink_connection.recv_match(type='MISSION_COUNT', blocking=True, timeout=0.1)
-                if msg:
-                    count = msg.count
+            max_retries = 3
+            for attempt in range(max_retries):
+                self.mavlink_connection.mav.mission_request_list_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component
+                )
+                for _ in range(20):
+                    msg = self.mavlink_connection.recv_match(type='MISSION_COUNT', blocking=True, timeout=0.1)
+                    if msg:
+                        count = msg.count
+                        break
+                if count is not None:
                     break
+                time.sleep(0.5)
             if count is None:
-                print("Timeout waiting for MISSION_COUNT")
-                tk.messagebox.showerror("Error", "Timeout waiting for MISSION_COUNT.")
+                print("Timeout waiting for MISSION_COUNT after retries")
+                self.master.after(0, lambda: tk.messagebox.showerror("Error", "Timeout waiting for MISSION_COUNT."))
                 return
             print(f"Mission has {count} waypoints:")
-            # Request and print each waypoint
+            # Robustly collect all items, retrying for missing ones
+            items = {}
+            max_item_retries = 5
+            for attempt in range(max_item_retries):
+                # Wait for all items to arrive
+                for _ in range(200 * count):  # up to 20 seconds per item
+                    msg = self.mavlink_connection.recv_match(type=['MISSION_ITEM_INT', 'MISSION_ITEM'], blocking=True, timeout=0.05)
+                    if msg and hasattr(msg, 'seq'):
+                        if msg.seq not in items:
+                            print(f"Received MISSION_ITEM(_INT) seq {msg.seq}")
+                        items[msg.seq] = msg
+                    if len(items) == count:
+                        break
+                if len(items) == count:
+                    break
+                # Request missing items
+                missing = [seq for seq in range(count) if seq not in items]
+                for seq in missing:
+                    print(f"Requesting missing seq {seq}")
+                    try:
+                        self.mavlink_connection.mav.mission_request_int_send(
+                            self.mavlink_connection.target_system,
+                            self.mavlink_connection.target_component,
+                            seq
+                        )
+                    except Exception:
+                        self.mavlink_connection.mav.mission_request_send(
+                            self.mavlink_connection.target_system,
+                            self.mavlink_connection.target_component,
+                            seq
+                        )
+                time.sleep(0.2)
+            # Print results
             waypoints = []
             for seq in range(count):
-                self.mavlink_connection.mav.mission_request_int_send(
-                    self.mavlink_connection.target_system,
-                    self.mavlink_connection.target_component,
-                    seq
-                )
-                for _ in range(50):
-                    msg = self.mavlink_connection.recv_match(type=['MISSION_ITEM', 'MISSION_ITEM_INT'], blocking=True, timeout=0.1)
-                    if msg and msg.seq == seq:
-                        if hasattr(msg, 'x') and hasattr(msg, 'y'):
-                            lat = msg.x / 1e7
-                            lon = msg.y / 1e7
-                        elif hasattr(msg, 'param5') and hasattr(msg, 'param6'):
-                            lat = msg.param5
-                            lon = msg.param6
-                        else:
-                            lat = lon = None
-                        waypoints.append((lat, lon))
-                        print(f"  Waypoint {seq}: Lat {lat}, Lon {lon}")
-                        break
+                item = items.get(seq)
+                if item is None:
+                    print(f"Timeout waiting for MISSION_ITEM(_INT) for seq {seq}")
+                    continue
+                if hasattr(item, 'x') and hasattr(item, 'y'):
+                    lat = item.x / 1e7
+                    lon = item.y / 1e7
+                elif hasattr(item, 'param5') and hasattr(item, 'param6'):
+                    lat = item.param5
+                    lon = item.param6
+                else:
+                    lat = lon = None
+                waypoints.append((lat, lon))
+                print(f"  Waypoint {seq}: Lat {lat}, Lon {lon}")
             print(f"Total waypoints received: {len(waypoints)}")
         except Exception as e:
             print(f"Error querying mission waypoints: {e}")
-            tk.messagebox.showerror("Error", f"Failed to query mission: {e}")
+            self.master.after(0, lambda: tk.messagebox.showerror("Error", f"Failed to query mission: {e}"))
 
     def init_telemetry_instruments(self):
         # Import PIL.ImageDraw here if not already
@@ -1045,6 +1288,28 @@ class MapApp:
     def zoom_to_drone_location(self):
         self.map_widget.set_position(self.current_lat, self.current_lon)
         self.map_widget.set_zoom(18)
+
+    def update_flight_mode_display(self):
+        """Poll the current flight mode from the drone and update the label."""
+        if not self.is_connected or not self.mavlink_connection:
+            return
+        try:
+            # Get the latest HEARTBEAT message (non-blocking first, then blocking)
+            msg = self.mavlink_connection.recv_match(type='HEARTBEAT', blocking=False)
+            if msg is None:
+                msg = self.mavlink_connection.recv_match(type='HEARTBEAT', blocking=True, timeout=2)
+            if msg:
+                from pymavlink import mavutil
+                mode_str = mavutil.mode_string_v10(msg)
+                self.flight_mode_var.set(f"Flight Mode: {mode_str}")
+            else:
+                self.flight_mode_var.set("Flight Mode: --")
+        except Exception as e:
+            self.flight_mode_var.set("Flight Mode: --")
+            print(f"Flight mode polling error: {e}")
+        # Schedule next update in 20 seconds if still connected
+        if self.is_connected:
+            self.master.after(20000, self.update_flight_mode_display)
 
 if __name__ == "__main__":
     root = tk.Tk()
