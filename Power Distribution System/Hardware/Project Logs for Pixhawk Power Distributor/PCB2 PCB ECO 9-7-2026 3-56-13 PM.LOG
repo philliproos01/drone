@@ -1,0 +1,8 @@
+Removed Pin From Net: NetName=NetLidar Conn_3 Pin=Pixhawk Telem Connector-1
+Removed Pin From Net: NetName=NetLidar Conn_2 Pin=Pixhawk Telem Connector-2
+Removed Pin From Net: NetName=NetLidar Conn_1 Pin=Pixhawk Telem Connector-3
+Removed Pin From Net: NetName=GND Pin=Pixhawk Telem Connector-6
+Added Pin To Net: NetName=GND Pin=Pixhawk Telem Connector-1
+Added Pin To Net: NetName=NetLidar Conn_1 Pin=Pixhawk Telem Connector-4
+Added Pin To Net: NetName=NetLidar Conn_2 Pin=Pixhawk Telem Connector-5
+Added Pin To Net: NetName=NetLidar Conn_3 Pin=Pixhawk Telem Connector-6
